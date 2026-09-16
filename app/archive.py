@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
-import mimetypes
-import shutil
+import re
 import subprocess
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .security import validate_extracted_tree
 
@@ -15,13 +12,13 @@ SUPPORTED_EXTENSIONS = {
 }
 
 MAGIC_SIGNATURES = (
-    (b"PK\x03\x04", ".zip"),
-    (b"7z\xbc\xaf\x27\x1c", ".7z"),
-    (b"Rar!\x1a\x07\x00", ".rar"),
-    (b"Rar!\x1a\x07\x01\x00", ".rar"),
-    (b"\x1f\x8b", ".gz"),
-    (b"BZh", ".bz2"),
-    (b"\xfd7zXZ\x00", ".xz"),
+    (b"PK\x03\x04", "zip"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"Rar!\x1a\x07\x00", "rar"),
+    (b"Rar!\x1a\x07\x01\x00", "rar"),
+    (b"\x1f\x8b", "gz"),
+    (b"BZh", "bz2"),
+    (b"\xfd7zXZ\x00", "xz"),
 )
 
 
@@ -48,10 +45,9 @@ def detect_archive(path: Path) -> str | None:
         return path.suffix.lower().lstrip(".")
     with path.open("rb") as handle:
         header = handle.read(16)
-    for signature, extension in MAGIC_SIGNATURES:
+    for signature, kind in MAGIC_SIGNATURES:
         if header.startswith(signature):
-            return extension.lstrip(".")
-    # POSIX tar has its magic at offset 257.
+            return kind
     try:
         with path.open("rb") as handle:
             handle.seek(257)
@@ -62,8 +58,26 @@ def detect_archive(path: Path) -> str | None:
     return None
 
 
+def _validate_member_name(name: str) -> None:
+    # Reject traversal before extraction, because validating only after 7z writes
+    # files is too late if a malicious member escapes the extraction directory.
+    normalized = name.replace("\\", "/")
+    if not normalized or "\x00" in normalized:
+        raise ValueError("Archive contains an invalid member name.")
+    if normalized.startswith("/") or normalized.startswith("//"):
+        raise ValueError("Archive contains an absolute path.")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        raise ValueError("Archive contains a Windows absolute path.")
+    parts = PurePosixPath(normalized).parts
+    if ".." in parts:
+        raise ValueError("Archive path traversal detected.")
+    win_parts = PureWindowsPath(normalized).parts
+    if any(part == ".." for part in win_parts) or PureWindowsPath(normalized).is_absolute():
+        raise ValueError("Archive path traversal detected.")
+
+
 def _list_entries(path: Path) -> tuple[int, int]:
-    """Ask 7z for metadata before extraction. Output is parsed as JSON when supported."""
+    """Read 7-Zip metadata and validate member names before any extraction occurs."""
     proc = subprocess.run(
         ["7z", "l", "-slt", str(path)],
         capture_output=True,
@@ -78,12 +92,15 @@ def _list_entries(path: Path) -> tuple[int, int]:
     current: dict[str, str] = {}
     for line in proc.stdout.splitlines() + [""]:
         if line.strip() == "":
-            if current.get("Path") and current.get("Folder") != "+":
-                entries += 1
-                try:
-                    declared += int(current.get("Size", "0"))
-                except ValueError:
-                    raise ValueError("Archive contains an invalid size field.")
+            member = current.get("Path")
+            if member:
+                _validate_member_name(member)
+                if current.get("Folder") != "+":
+                    entries += 1
+                    try:
+                        declared += int(current.get("Size", "0"))
+                    except ValueError as exc:
+                        raise ValueError("Archive contains an invalid size field.") from exc
             current = {}
             continue
         if " = " in line:
