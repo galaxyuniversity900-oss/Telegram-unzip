@@ -6,8 +6,8 @@ from dataclasses import asdict, dataclass
 
 from redis.asyncio import Redis
 
-
 QUEUE_NAME = "tuzsbot:jobs"
+PROCESSING_NAME = "tuzsbot:jobs:processing"
 JOB_PREFIX = "tuzsbot:job:"
 
 
@@ -38,8 +38,7 @@ class RedisJobQueue:
     async def create(self, job: QueueJob) -> None:
         key = self._key(job.job_id)
         payload = asdict(job)
-        payload["status"] = "queued"
-        await self.redis.hset(key, mapping=payload)
+        await self.redis.hset(key, mapping={**payload, "status": "queued"})
         await self.redis.expire(key, self.ttl_seconds)
         await self.redis.rpush(QUEUE_NAME, json.dumps(asdict(job), separators=(",", ":")))
 
@@ -52,18 +51,24 @@ class RedisJobQueue:
             await self.redis.expire(self._key(job_id), self.ttl_seconds)
 
     async def user_has_active_job(self, user_id: int) -> bool:
-        pattern = f"{JOB_PREFIX}*"
-        async for key in self.redis.scan_iter(match=pattern, count=100):
+        async for key in self.redis.scan_iter(match=f"{JOB_PREFIX}*", count=100):
             data = await self.redis.hgetall(key)
             if data.get("user_id") == str(user_id) and data.get("status") in {"queued", "running"}:
                 return True
         return False
 
     async def claim(self, timeout: int = 5) -> QueueJob | None:
-        item = await self.redis.blpop(QUEUE_NAME, timeout=timeout)
-        if not item:
+        item = await self.redis.blmove(QUEUE_NAME, PROCESSING_NAME, timeout=timeout, where="RIGHT", dest="LEFT")
+        if item is None:
             return None
-        payload = json.loads(item[1])
-        job = QueueJob(**payload)
+        job = QueueJob(**json.loads(item))
         await self.update(job.job_id, status="running", started_at=str(time.time()))
         return job
+
+    async def ack(self, job_id: str) -> None:
+        # Processing entries contain the complete job payload, so acknowledge by job id.
+        async for raw in self.redis.lrange(PROCESSING_NAME, 0, -1):
+            payload = json.loads(raw)
+            if payload.get("job_id") == job_id:
+                await self.redis.lrem(PROCESSING_NAME, 1, raw)
+                return
