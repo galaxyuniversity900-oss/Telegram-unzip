@@ -23,6 +23,7 @@ def env_int(name: str, default: int, minimum: int = 1) -> int:
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
+    redis_url: str
     max_download_bytes: int
     max_extracted_bytes: int
     max_files: int
@@ -44,6 +45,7 @@ class Settings:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
         return cls(
             telegram_bot_token=token,
+            redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0").strip(),
             max_download_bytes=env_int("MAX_DOWNLOAD_MB", 200) * 1024 * 1024,
             max_extracted_bytes=env_int("MAX_EXTRACTED_MB", 500) * 1024 * 1024,
             max_files=env_int("MAX_FILES", 5000),
