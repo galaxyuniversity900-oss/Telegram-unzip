@@ -44,8 +44,8 @@ class Settings:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
         return cls(
             telegram_bot_token=token,
-            max_download_bytes=env_int("MAX_DOWNLOAD_MB", 200),
-            max_extracted_bytes=env_int("MAX_EXTRACTED_MB", 500),
+            max_download_bytes=env_int("MAX_DOWNLOAD_MB", 200) * 1024 * 1024,
+            max_extracted_bytes=env_int("MAX_EXTRACTED_MB", 500) * 1024 * 1024,
             max_files=env_int("MAX_FILES", 5000),
             max_ratio=env_int("MAX_RATIO", 100),
             max_archive_depth=env_int("MAX_ARCHIVE_DEPTH", 2),
