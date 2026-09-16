@@ -15,6 +15,7 @@ from .config import Settings
 from .downloader import download_url
 from .jobs import JobManager
 from .staged import extract_archive_staged
+from .worker import ExtractionQueue, WorkItem
 
 settings = Settings.from_env()
 bot = Bot(settings.telegram_bot_token)
@@ -109,9 +110,21 @@ async def process_archive(message: Message, archive: Path, job_root: Path, job_i
         await message.answer(f"❌ {exc}")
 
 
+extraction_queue = ExtractionQueue(settings.max_concurrent_jobs, process_archive)
+
+
 async def start_job(message: Message, archive: Path, job_root: Path, job_id: str) -> None:
-    async with jobs.semaphore:
-        await process_archive(message, archive, job_root, job_id)
+    accepted = await extraction_queue.submit(WorkItem(message, archive, job_root, job_id))
+    if not accepted:
+        await jobs.release(job_id)
+        await message.answer("⏳ The extraction queue is full. Please retry shortly.")
+        return
+    position = extraction_queue.queue.qsize()
+    await message.answer(
+        "📥 Job queued successfully.\n"
+        f"👷 Workers: {settings.max_concurrent_jobs}\n"
+        f"📋 Queue depth: {position}"
+    )
 
 
 @dp.message(CommandStart())
@@ -119,7 +132,7 @@ async def start_handler(message: Message):
     await message.answer(
         "👋 TuzsBot\n\n"
         "Send a ZIP, RAR, 7Z, TAR/GZ/BZ2/XZ archive or a direct HTTP(S) archive URL.\n\n"
-        "Large archives are processed in ordered, validated stages instead of one giant extraction operation."
+        "Large archives run in ordered, validated stages in background workers, so Telegram polling remains responsive."
     )
 
 
@@ -204,6 +217,7 @@ async def fallback(message: Message):
 
 async def main() -> None:
     settings.work_dir.mkdir(parents=True, exist_ok=True)
+    await extraction_queue.start()
     cleanup_task = asyncio.create_task(jobs.cleanup_expired())
     try:
         await dp.start_polling(bot)
@@ -211,6 +225,7 @@ async def main() -> None:
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
+        await extraction_queue.stop()
         await bot.session.close()
 
 
