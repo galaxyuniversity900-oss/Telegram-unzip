@@ -1,4 +1,12 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: tuzsbot-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
   tuzsbot:
     build:
       context: .
@@ -10,6 +18,9 @@ services:
       - .env
     environment:
       WORK_DIR: /tmp/tuzsbot
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
     volumes:
       - tuzsbot-data:/tmp/tuzsbot
     stop_grace_period: 30s
@@ -18,7 +29,35 @@ services:
     cap_drop:
       - ALL
     pids_limit: 256
-    mem_swappiness: 0
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tuzsbot-worker
+    restart: unless-stopped
+    init: true
+    command: ["python", "-m", "app.worker_main"]
+    env_file:
+      - .env
+    environment:
+      WORK_DIR: /tmp/tuzsbot
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - tuzsbot-data:/tmp/tuzsbot
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
     logging:
       driver: json-file
       options:
@@ -27,3 +66,4 @@ services:
 
 volumes:
   tuzsbot-data:
+  redis-data:
