@@ -35,24 +35,12 @@ async def run_worker() -> None:
             output = Path(job.job_root) / "extracted"
 
             def progress(batch: int, total_batches: int, completed: int, written: int) -> None:
-                asyncio.create_task(queue.update(
-                    job.job_id,
-                    progress=str(completed),
-                    batches=f"{batch}/{total_batches}",
-                    bytes_written=str(written),
-                ))
+                asyncio.create_task(queue.update(job.job_id, progress=str(completed), batches=f"{batch}/{total_batches}", bytes_written=str(written)))
 
             result = await asyncio.to_thread(
-                extract_archive_staged,
-                Path(job.archive_path),
-                output,
-                settings.max_files,
-                settings.max_extracted_bytes,
-                settings.max_ratio,
-                settings.extraction_timeout_seconds,
-                settings.extraction_batch_size,
-                progress,
-                None,
+                extract_archive_staged, Path(job.archive_path), output,
+                settings.max_files, settings.max_extracted_bytes, settings.max_ratio,
+                settings.extraction_timeout_seconds, settings.extraction_batch_size, progress, None,
             )
             files = list(iter_files(output))
             await queue.update(job.job_id, status="completed", progress=str(result.entries), files=str(len(files)), bytes_written=str(result.bytes_written))
@@ -60,18 +48,17 @@ async def run_worker() -> None:
             await bot.send_message(
                 job.chat_id,
                 "✅ Extraction complete\n\n"
-                f"🧩 Batches: {result.batches:,}\n"
-                f"📁 Files: {result.entries:,}\n"
-                f"💾 Output: {format_size(result.bytes_written)}\n"
-                f"📄 Pages: {pages}\n"
-                f"⏱️ Elapsed: {time.monotonic() - started:.1f}s\n\n"
-                f"Job ID: {job.job_id}",
+                f"🧩 Batches: {result.batches:,}\n📁 Files: {result.entries:,}\n"
+                f"💾 Output: {format_size(result.bytes_written)}\n📄 Pages: {pages}\n"
+                f"⏱️ Elapsed: {time.monotonic() - started:.1f}s\n\nJob ID: {job.job_id}",
                 reply_markup=result_keyboard(job.job_id),
             )
         except Exception as exc:
             await queue.update(job.job_id, status="failed", error=str(exc))
             with contextlib.suppress(Exception):
                 await bot.send_message(job.chat_id, f"❌ Extraction failed: {exc}\n\nJob ID: {job.job_id}")
+        finally:
+            await queue.ack(job.job_id)
 
     try:
         while True:
