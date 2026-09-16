@@ -2,28 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import re
+import time
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .archive import extract_archive, format_size, inspect_archive, iter_files
+from .archive import format_size, iter_files
 from .config import Settings
 from .downloader import download_url
 from .jobs import JobManager
+from .staged import extract_archive_staged
 
 settings = Settings.from_env()
 bot = Bot(settings.telegram_bot_token)
 dp = Dispatcher()
-jobs = JobManager(
-    settings.work_dir,
-    settings.max_concurrent_jobs,
-    settings.max_jobs_per_user,
-    settings.job_ttl_seconds,
-)
+jobs = JobManager(settings.work_dir, settings.max_concurrent_jobs, settings.max_jobs_per_user, settings.job_ttl_seconds)
 
 URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 PAGE_SIZE = 10
@@ -48,39 +44,50 @@ def browse_keyboard(job_id: str, page: int, total_pages: int) -> InlineKeyboardM
     if page + 1 < total_pages:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"b:{job_id}:{page+1}"))
     rows = [nav] if nav else []
-    if page < total_pages:
-        rows.append([InlineKeyboardButton(text="📤 Download this page", callback_data=f"d:{job_id}:{page}")])
+    rows.append([InlineKeyboardButton(text="📤 Download this page", callback_data=f"d:{job_id}:{page}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def process_archive(message: Message, archive: Path, job_root: Path, job_id: str) -> None:
     try:
-        await message.answer("🔎 Inspecting archive before extraction…")
-        info = await asyncio.to_thread(
-            inspect_archive,
-            archive,
-            settings.max_files,
-            settings.max_extracted_bytes,
-            settings.max_ratio,
-        )
         await message.answer(
-            "📦 Archive detected\n\n"
-            f"Format: {info.kind.upper()}\n"
-            f"Compressed: {format_size(info.compressed_bytes)}\n"
-            f"Entries: {info.entries:,}\n"
-            f"Declared output: {format_size(info.declared_uncompressed_bytes)}\n"
-            f"Ratio: {info.ratio:.1f}×\n\n"
-            "🛡️ Safety checks passed. Extracting…"
+            "🚀 Starting staged extraction…\n\n"
+            f"⚡ Batch size: {settings.extraction_batch_size} files\n"
+            "📌 Files are extracted in deterministic ordered chunks."
         )
+        loop = asyncio.get_running_loop()
+        started = time.monotonic()
+        last_report = [started]
+        progress_message = await message.answer("⏳ Preparing extraction stages…")
+
+        def progress(batch: int, total_batches: int, completed: int, written: int) -> None:
+            now = time.monotonic()
+            if batch != total_batches and now - last_report[0] < settings.extraction_progress_seconds:
+                return
+            last_report[0] = now
+            elapsed = max(now - started, 0.001)
+            rate = written / elapsed
+            text = (
+                f"⚙️ Extracting batch {batch}/{total_batches}\n"
+                f"📄 Files processed: {completed:,}\n"
+                f"💾 Materialized: {format_size(written)}\n"
+                f"🚀 Effective rate: {format_size(int(rate))}/s\n"
+                "🧩 Earlier batches remain valid while later batches are processed."
+            )
+            loop.call_soon_threadsafe(asyncio.create_task, progress_message.edit_text(text))
+
         output = job_root / "extracted"
         result = await asyncio.to_thread(
-            extract_archive,
+            extract_archive_staged,
             archive,
             output,
             settings.max_files,
             settings.max_extracted_bytes,
             settings.max_ratio,
             settings.extraction_timeout_seconds,
+            settings.extraction_batch_size,
+            progress,
+            None,
         )
         files = list(iter_files(output))
         job = await jobs.get(job_id, message.from_user.id)
@@ -88,12 +95,13 @@ async def process_archive(message: Message, archive: Path, job_root: Path, job_i
             raise ValueError("Job expired.")
         job.files = files
         pages = max(1, (len(files) + PAGE_SIZE - 1) // PAGE_SIZE)
-        await message.answer(
-            "✅ Extraction complete\n\n"
+        await progress_message.edit_text(
+            "✅ Staged extraction complete\n\n"
+            f"🧩 Batches: {result.batches:,}\n"
             f"📁 Files: {result.entries:,}\n"
-            f"💾 Output: {format_size(result.declared_uncompressed_bytes)}\n"
+            f"💾 Output: {format_size(result.bytes_written)}\n"
             f"📄 Pages: {pages}\n\n"
-            "The extracted workspace will be deleted automatically after the job TTL.",
+            "Each completed stage was validated before continuing. The workspace will be deleted automatically after the job TTL.",
             reply_markup=archive_keyboard(job_id),
         )
     except Exception as exc:
@@ -110,8 +118,8 @@ async def start_job(message: Message, archive: Path, job_root: Path, job_id: str
 async def start_handler(message: Message):
     await message.answer(
         "👋 TuzsBot\n\n"
-        "Send me a ZIP, RAR, 7Z, TAR/GZ/BZ2/XZ archive or a direct HTTP(S) archive URL.\n\n"
-        "I inspect it, enforce safety limits, extract it, and let you browse/download the result."
+        "Send a ZIP, RAR, 7Z, TAR/GZ/BZ2/XZ archive or a direct HTTP(S) archive URL.\n\n"
+        "Large archives are processed in ordered, validated stages instead of one giant extraction operation."
     )
 
 
@@ -146,9 +154,7 @@ async def url_handler(message: Message):
         return
     try:
         await message.answer("⬇️ Downloading archive URL…")
-        archive, size = await download_url(
-            message.text.strip(), root, settings.max_download_bytes, settings.download_timeout_seconds
-        )
+        archive, size = await download_url(message.text.strip(), root, settings.max_download_bytes, settings.download_timeout_seconds)
         await message.answer(f"⬇️ Download complete: {format_size(size)}")
         await start_job(message, archive, root, job.job_id)
     except Exception as exc:
