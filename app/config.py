@@ -33,6 +33,8 @@ class Settings:
     max_concurrent_jobs: int
     max_jobs_per_user: int
     job_ttl_seconds: int
+    extraction_batch_size: int
+    extraction_progress_seconds: int
     work_dir: Path
 
     @classmethod
@@ -42,8 +44,8 @@ class Settings:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
         return cls(
             telegram_bot_token=token,
-            max_download_bytes=env_int("MAX_DOWNLOAD_MB", 200) * 1024 * 1024,
-            max_extracted_bytes=env_int("MAX_EXTRACTED_MB", 500) * 1024 * 1024,
+            max_download_bytes=env_int("MAX_DOWNLOAD_MB", 200),
+            max_extracted_bytes=env_int("MAX_EXTRACTED_MB", 500),
             max_files=env_int("MAX_FILES", 5000),
             max_ratio=env_int("MAX_RATIO", 100),
             max_archive_depth=env_int("MAX_ARCHIVE_DEPTH", 2),
@@ -52,5 +54,7 @@ class Settings:
             max_concurrent_jobs=env_int("MAX_CONCURRENT_JOBS", 2),
             max_jobs_per_user=env_int("MAX_JOBS_PER_USER", 1),
             job_ttl_seconds=env_int("JOB_TTL_SECONDS", 900),
+            extraction_batch_size=env_int("EXTRACTION_BATCH_SIZE", 100),
+            extraction_progress_seconds=env_int("EXTRACTION_PROGRESS_SECONDS", 5),
             work_dir=Path(os.getenv("WORK_DIR", "/tmp/tuzsbot")).expanduser(),
         )
