@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable, Sequence
+from typing import Callable
 
 from .archive import _validate_member_name, detect_archive
 from .security import validate_extracted_tree
@@ -24,7 +24,7 @@ class StagedResult:
 
 
 def list_archive_members(path: Path) -> list[ArchiveMember]:
-    """Return validated archive members in the order reported by 7-Zip."""
+    """Return validated archive members in deterministic 7-Zip listing order."""
     proc = subprocess.run(
         ["7z", "l", "-slt", str(path)],
         capture_output=True,
@@ -40,7 +40,8 @@ def list_archive_members(path: Path) -> list[ArchiveMember]:
     for line in proc.stdout.splitlines() + [""]:
         if not line.strip():
             name = current.get("Path")
-            if name:
+            # 7-Zip's first metadata block describes the container itself.
+            if name and "Type" not in current and "Physical Size" not in current:
                 _validate_member_name(name)
                 directory = current.get("Folder") == "+"
                 try:
@@ -79,11 +80,7 @@ def extract_archive_staged(
     progress: Callable[[int, int, int, int], None] | None = None,
     password: str | None = None,
 ) -> StagedResult:
-    """Extract in deterministic batches, keeping the partial result valid after each batch.
-
-    Each batch is a separate 7z process. If a later batch fails, earlier batches remain
-    intact and can be inspected or resumed by a higher-level job manager.
-    """
+    """Extract in deterministic batches, keeping each completed stage usable."""
     if batch_size < 1 or batch_size > 1000:
         raise ValueError("batch_size must be between 1 and 1000")
     kind = detect_archive(archive)
@@ -110,33 +107,22 @@ def extract_archive_staged(
 
     for batch_no, offset in enumerate(range(0, len(files), batch_size), start=1):
         batch = files[offset : offset + batch_size]
-        # Passing member names as positional arguments avoids shell expansion and
-        # limits the amount of archive content processed by each extraction process.
         command = ["7z", "x", "-y", "-bd", f"-o{output}"]
         if password is not None:
             command.append(f"-p{password}")
         command.extend([str(archive), *[m.name for m in batch]])
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
         if proc.returncode != 0:
             if "password" in (proc.stderr + proc.stdout).lower():
                 raise ValueError(f"Batch {batch_no}/{total_batches} needs a valid archive password.")
             raise ValueError(f"Staged extraction failed at batch {batch_no}/{total_batches}.")
 
-        # Validate the complete materialized tree after every batch. This gives us
-        # a hard cumulative ceiling, even if archive metadata is misleading.
-        actual_entries, actual_bytes = validate_extracted_tree(output, max_files, max_bytes)
+        _, actual_bytes = validate_extracted_tree(output, max_files, max_bytes)
         completed += len(batch)
         bytes_written = actual_bytes
         if progress:
             progress(batch_no, total_batches, completed, bytes_written)
 
-    # Empty archives still produce a completed stage.
     if not files and progress:
         progress(1, 1, 0, 0)
     return StagedResult(total_batches, completed, bytes_written)
