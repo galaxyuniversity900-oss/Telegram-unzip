@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +32,7 @@ class JobManager:
             active = self.user_jobs.get(user_id, set())
             if len(active) >= self.max_jobs_per_user:
                 return None, self.root
-            job_id = next(tempfile._get_candidate_names())
+            job_id = uuid.uuid4().hex[:16]
             root = self.root / f"job-{job_id}"
             root.mkdir(parents=True, exist_ok=False)
             job = Job(job_id, user_id, root, time.time(), [])
